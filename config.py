@@ -24,6 +24,14 @@ class Config(BaseSettings):
     GENERATION_TIMEOUT: int = 300  # 5 minutes for generation
     LOGIN_TIMEOUT: int = 120  # 2 minutes for login
     
+    # OAuth settings
+    OAUTH_GOOGLE_CLIENT_ID: str = ""
+    OAUTH_GOOGLE_CLIENT_SECRET: str = ""
+    OAUTH_GITHUB_CLIENT_ID: str = ""
+    OAUTH_GITHUB_CLIENT_SECRET: str = ""
+    OAUTH_TWITTER_CLIENT_ID: str = ""
+    OAUTH_TWITTER_CLIENT_SECRET: str = ""
+    
     class Config:
         env_file = ".env"
         env_file_encoding = 'utf-8'

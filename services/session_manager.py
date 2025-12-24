@@ -2,11 +2,12 @@ import os
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from config import config
 import asyncio
+import uuid
 
 class SessionManager:
     def __init__(self):
@@ -237,3 +238,148 @@ class SessionManager:
             await self.page.wait_for_load_state("networkidle")
             
         return self.page
+    
+    async def oauth_login(self, provider: str, auth_code: str, redirect_uri: Optional[str] = None, remember_me: bool = True) -> Tuple[bool, str]:
+        """
+        Perform OAuth authorization login
+        """
+        try:
+            await self.initialize()
+            
+            # Create new context with persistent storage
+            user_data_dir = Path(config.SESSION_DIR) / "user_data"
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+            
+            self.context = await self.browser.new_context(
+                user_data_dir=str(user_data_dir),
+                viewport={"width": 1280, "height": 800},
+                ignore_https_errors=True
+            )
+            
+            self.page = await self.context.new_page()
+            
+            # Navigate to OAuth callback URL or provider-specific login page
+            oauth_url = self._get_oauth_url(provider, auth_code, redirect_uri)
+            await self.page.goto(oauth_url, timeout=config.LOGIN_TIMEOUT * 1000)
+            
+            # Wait for OAuth completion - this depends on the specific website's OAuth flow
+            await self.page.wait_for_load_state("networkidle", timeout=config.LOGIN_TIMEOUT * 1000)
+            
+            # Check if OAuth login was successful
+            logged_in = await self._check_login_success()
+            
+            if logged_in:
+                # Generate a session ID
+                session_id = str(uuid.uuid4())
+                
+                # Save session information
+                session_data = {
+                    "logged_in": True,
+                    "timestamp": datetime.now().isoformat(),
+                    "expiry": (datetime.now() + timedelta(days=30)).isoformat(),
+                    "browser_type": config.BROWSER_TYPE,
+                    "login_method": "oauth",
+                    "oauth_provider": provider,
+                    "session_id": session_id
+                }
+                
+                with open(self.session_file, "w") as f:
+                    json.dump(session_data, f)
+                
+                return True, session_id
+            else:
+                return False, ""
+                
+        except Exception as e:
+            logging.error(f"OAuth login failed: {str(e)}")
+            await self.close()
+            return False, ""
+    
+    def _get_oauth_url(self, provider: str, auth_code: str, redirect_uri: Optional[str] = None) -> str:
+        """
+        Get the appropriate OAuth URL based on provider
+        """
+        # This is a placeholder - actual implementation depends on the target website's OAuth flow
+        # Different websites have different OAuth callback URLs and flows
+        
+        if provider.lower() == "google":
+            return f"{config.GROK_URL}/auth/google/callback?code={auth_code}&redirect_uri={redirect_uri or ''}"
+        elif provider.lower() == "github":
+            return f"{config.GROK_URL}/auth/github/callback?code={auth_code}&redirect_uri={redirect_uri or ''}"
+        elif provider.lower() == "twitter" or provider.lower() == "x":
+            return f"{config.GROK_URL}/auth/twitter/callback?code={auth_code}&redirect_uri={redirect_uri or ''}"
+        else:
+            # Default fallback - may need to be customized
+            return f"{config.GROK_URL}/auth/{provider}/callback?code={auth_code}&redirect_uri={redirect_uri or ''}"
+    
+    async def inject_cookies(self, cookies: List[Dict[str, Any]], user_agent: Optional[str] = None, remember_me: bool = True) -> Tuple[bool, int]:
+        """
+        Manually inject cookies to establish a session
+        """
+        try:
+            await self.initialize()
+            
+            # Create new context with persistent storage
+            user_data_dir = Path(config.SESSION_DIR) / "user_data"
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+            
+            self.context = await self.browser.new_context(
+                user_data_dir=str(user_data_dir),
+                viewport={"width": 1280, "height": 800},
+                ignore_https_errors=True
+            )
+            
+            # Set user agent if provided
+            if user_agent:
+                await self.context.set_user_agent(user_agent)
+            
+            self.page = await self.context.new_page()
+            
+            # Add cookies to the browser context
+            cookie_count = 0
+            for cookie in cookies:
+                try:
+                    await self.context.add_cookies([{
+                        "name": cookie["name"],
+                        "value": cookie["value"],
+                        "domain": cookie["domain"],
+                        "path": cookie.get("path", "/"),
+                        "expires": cookie.get("expires"),
+                        "httpOnly": cookie.get("httpOnly", False),
+                        "secure": cookie.get("secure", False),
+                        "sameSite": cookie.get("sameSite")
+                    }])
+                    cookie_count += 1
+                except Exception as e:
+                    logging.warning(f"Failed to add cookie {cookie['name']}: {str(e)}")
+            
+            # Navigate to the target website to test the session
+            await self.page.goto(config.GROK_URL, timeout=config.BROWSER_TIMEOUT)
+            await self.page.wait_for_load_state("networkidle")
+            
+            # Check if the session is valid
+            logged_in = await self._check_login_success()
+            
+            if logged_in and cookie_count > 0:
+                # Save session information
+                session_data = {
+                    "logged_in": True,
+                    "timestamp": datetime.now().isoformat(),
+                    "expiry": (datetime.now() + timedelta(days=30)).isoformat(),
+                    "browser_type": config.BROWSER_TYPE,
+                    "login_method": "cookie_injection",
+                    "cookie_count": cookie_count,
+                    "user_agent": user_agent
+                }
+                
+                with open(self.session_file, "w") as f:
+                    json.dump(session_data, f)
+                
+                return True, cookie_count
+            else:
+                return False, 0
+                
+        except Exception as e:
+            logging.error(f"Cookie injection failed: {str(e)}")
+            await self.close()
+            return False, 0

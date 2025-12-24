@@ -57,6 +57,14 @@ SESSION_DIR=./sessions
 # AI Website URLs
 GROK_URL=https://grok.ai
 X_AI_URL=https://x.ai
+
+# OAuth Configuration (optional - required for OAuth login)
+OAUTH_GOOGLE_CLIENT_ID=your_google_client_id
+OAUTH_GOOGLE_CLIENT_SECRET=your_google_client_secret
+OAUTH_GITHUB_CLIENT_ID=your_github_client_id
+OAUTH_GITHUB_CLIENT_SECRET=your_github_client_secret
+OAUTH_TWITTER_CLIENT_ID=your_twitter_client_id
+OAUTH_TWITTER_CLIENT_SECRET=your_twitter_client_secret
 ```
 
 ## Running the Service
@@ -76,6 +84,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
 **Note**: Use only 1 worker since Playwright browsers are not thread-safe.
 
 ## First-Time Setup
+
+For detailed information about different login modes, see the [Login Modes Documentation](docs/LOGIN_MODES.md).
 
 ### 1. Manual Login
 
@@ -103,6 +113,37 @@ Should return:
   "session_expiry": "2023-12-31T23:59:59Z",
   "browser_type": "chromium"
 }
+```
+
+### 3. OAuth Login (Alternative)
+
+For OAuth-based authentication:
+
+```bash
+curl -X POST http://localhost:8000/api/session/oauth-login \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "google", "auth_code": "your_auth_code", "redirect_uri": "http://localhost:8000/callback"}'
+```
+
+### 4. Manual Cookie Injection (Advanced)
+
+For direct session injection:
+
+```bash
+curl -X POST http://localhost:8000/api/session/inject-cookies \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cookies": [
+      {
+        "name": "session_id",
+        "value": "your_session_id",
+        "domain": ".grok.ai",
+        "path": "/",
+        "httpOnly": true,
+        "secure": true
+      }
+    ]
+  }'
 ```
 
 ## Using the API
