@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+.venv/
+venv/
+
+# Playwright
+playwright/.local-browsers/
+
+# Output files
+output/
+sessions/
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+
+# Mac
+.DS_Store
+
+# Windows
+Thumbs.db
