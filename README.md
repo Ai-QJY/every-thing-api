@@ -34,7 +34,11 @@ python main.py
 - POST `/api/grok/image` - Generate images from prompts
 - POST `/api/grok/video` - Generate videos from prompts (future)
 - POST `/api/session/login` - Manual login initialization
+- POST `/api/session/oauth-login` - OAuth authorization login
+- POST `/api/session/inject-cookies` - Manual session/cookie injection
 - GET `/api/session/status` - Check login status
+
+For detailed documentation on all login modes, see [Login Modes Documentation](docs/LOGIN_MODES.md).
 
 ## Configuration
 
