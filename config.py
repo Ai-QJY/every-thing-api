@@ -24,6 +24,11 @@ class Config(BaseSettings):
     GENERATION_TIMEOUT: int = 300  # 5 minutes for generation
     LOGIN_TIMEOUT: int = 120  # 2 minutes for login
     
+    # Grok specific settings
+    GROK_COOKIE_TIMEOUT: int = 60  # Cookie extraction timeout in seconds
+    GROK_LOGIN_TIMEOUT: int = 120  # Login operation timeout in seconds
+    GROK_HEADLESS_MODE: bool = False  # Use headless browser for debugging
+    
     # OAuth settings
     OAUTH_GOOGLE_CLIENT_ID: str = ""
     OAUTH_GOOGLE_CLIENT_SECRET: str = ""
