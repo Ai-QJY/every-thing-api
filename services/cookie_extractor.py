@@ -336,27 +336,49 @@ class ManualOAuthExtractor:
         self._stop_event = asyncio.Event()
     
     async def initialize(self, headless: bool = False):
-        """Initialize Playwright and launch browser with visible UI"""
+        """Initialize Playwright and launch browser with visible UI.
+
+        By default we use a persistent browser profile for the manual OAuth flow.
+        This avoids Playwright's default "fresh" context which many users interpret
+        as an incognito/guest mode window, and it also allows Google login to
+        persist between runs.
+        """
         self.playwright = await async_playwright().start()
-        
-        # Launch browser with UI (not headless)
-        self.browser = await self.playwright.chromium.launch(
-            headless=headless,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--no-sandbox',
-            ]
-        )
-        
-        # Create browser context with typical user settings
-        self.context = await self.browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            ignore_https_errors=True
-        )
-        
-        self.page = await self.context.new_page()
+
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+        ]
+
+        context_options = {
+            "viewport": {"width": 1280, "height": 800},
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "ignore_https_errors": True,
+        }
+
+        if config.GROK_OAUTH_PERSISTENT_CONTEXT:
+            profile_dir = Path(config.GROK_OAUTH_USER_DATA_DIR)
+            profile_dir.mkdir(parents=True, exist_ok=True)
+
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                args=launch_args,
+                **context_options,
+            )
+            self.browser = None
+        else:
+            self.browser = await self.playwright.chromium.launch(
+                headless=headless,
+                args=launch_args,
+            )
+            self.context = await self.browser.new_context(**context_options)
+
+        if self.context.pages:
+            self.page = self.context.pages[0]
+        else:
+            self.page = await self.context.new_page()
     
     async def close(self):
         """Close browser and cleanup resources"""
@@ -402,65 +424,56 @@ class ManualOAuthExtractor:
         print(f"\n⏰ 等待超时时间：{timeout} 秒（{timeout // 60} 分钟）")
         print("\n📌 提示：")
         print("   - 登录完成后，Cookie 将自动导出")
+        print("   - 提取完成前请不要关闭浏览器窗口（关闭会导致提取失败）")
         print("   - 可以随时按 Ctrl+C 中止操作")
         print("=" * 60 + "\n")
     
     async def _wait_for_login_completion(self, timeout_seconds: int) -> bool:
-        """
-        Wait for user to complete login by monitoring URL changes.
-        
-        Args:
-            timeout_seconds: Maximum time to wait
-            
-        Returns:
-            True if login appears complete, False if timeout
-        """
+        """Wait for user to complete login by monitoring URL changes."""
         try:
-            # Wait for URL to change to a Grok-related page
-            # This indicates the user has successfully authenticated
-            await asyncio.wait_for(
-                self._wait_for_url_change(),
-                timeout=timeout_seconds
-            )
-            return True
+            await asyncio.wait_for(self._wait_for_url_change(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             logger.info("Login completion wait timed out")
             return False
-    
+        except Exception as e:
+            logger.info(f"Login completion monitor stopped: {e}")
+            return False
+
+        if self._stop_event.is_set() or not self.page or self.page.is_closed():
+            return False
+
+        return True
+
     async def _wait_for_url_change(self):
-        """Wait for URL to change to a logged-in state"""
-        initial_url = self.page.url
-        
-        # Patterns that indicate successful login
-        logged_in_patterns = [
-            "**/feed**",
-            "**/chat**",
-            "**/grok.com/**",
-        ]
-        
-        # Poll for URL changes that indicate login
+        """Wait for URL to change to a logged-in state."""
         for _ in range(600):  # Check every second for 10 minutes max
+            if self._stop_event.is_set() or not self.page or self.page.is_closed():
+                return
+
             await asyncio.sleep(1)
-            current_url = self.page.url
-            
-            # Check if we're on a Grok page (not still on auth)
-            if "accounts.google.com" not in current_url and \
-               "grok.com" in current_url or \
-               "x.ai" in current_url:
+
+            try:
+                current_url = self.page.url
+            except Exception:
+                return
+
+            if (
+                "accounts.google.com" not in current_url
+                and ("grok.com" in current_url or "x.ai" in current_url)
+            ):
                 logger.info(f"Detected login completion. Current URL: {current_url}")
                 return
-            
-            # Also check if we see the chat interface or main content
+
             try:
-                # Check for common post-login elements
                 chat_elements = await self.page.query_selector_all(
                     '[class*="chat"], [class*="conversation"], textarea, input[class*="prompt"]'
                 )
-                if len(chat_elements) > 0:
+                if chat_elements:
                     logger.info("Detected chat interface elements")
                     return
             except Exception:
-                pass
+                if not self.page or self.page.is_closed():
+                    return
     
     async def extract_with_manual_oauth(
         self,
@@ -493,22 +506,48 @@ class ManualOAuthExtractor:
             self._print_user_instructions(timeout)
             
             # Open Grok
-            await self.page.goto(config.GROK_URL, timeout=30000)
-            await self.page.wait_for_load_state("networkidle", timeout=15000)
+            try:
+                await self.page.goto(config.GROK_URL, timeout=30000)
+                await self.page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception as e:
+                message = str(e)
+                if "has been closed" in message.lower():
+                    return {
+                        "status": "cancelled",
+                        "error_type": "browser_closed",
+                        "error_message": "Browser window was closed before navigation completed",
+                        "cookies": [],
+                        "cookie_count": 0,
+                    }
+                raise
             
             # Start monitoring for login completion in background
-            login_monitor_task = asyncio.create_task(
-                self._wait_for_login_completion(timeout)
-            )
-            
+            login_monitor_task = asyncio.create_task(self._wait_for_login_completion(timeout))
+
             # Wait for login completion or timeout
-            login_success = await login_monitor_task
-            
+            try:
+                login_success = await login_monitor_task
+            except Exception as e:
+                logger.warning(f"Login monitor task failed: {e}")
+                login_success = False
+
             # If login didn't complete via URL detection, still try to extract cookies
             # The user might have completed login but URL detection missed it
-            
+
             # Export cookies
-            cookies = await self.context.cookies()
+            try:
+                cookies = await self.context.cookies()
+            except Exception as e:
+                message = str(e)
+                if "has been closed" in message.lower():
+                    return {
+                        "status": "cancelled",
+                        "error_type": "browser_closed",
+                        "error_message": "Browser window was closed before cookies could be extracted",
+                        "cookies": [],
+                        "cookie_count": 0,
+                    }
+                raise
             
             end_time = datetime.now(timezone.utc)
             duration = (end_time - start_time).total_seconds()
