@@ -2,11 +2,18 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from services.session_manager import SessionManager
-from services.cookie_extractor import extract_cookies_from_grok
+from services.cookie_extractor import (
+    extract_cookies_from_grok,
+    extract_grok_cookies_with_manual_oauth,
+    save_cookies_to_file,
+    load_cookies_from_file,
+    ExtractionTask
+)
 from models.response_models import SessionStatusResponse
 import logging
 from typing import List, Optional
 import asyncio
+import uuid
 
 router = APIRouter()
 
@@ -51,6 +58,55 @@ class GrokLoginResponse(BaseModel):
     message: str
     session_id: Optional[str] = None
     cookie_count: Optional[int] = None
+
+
+class ManualOAuthRequest(BaseModel):
+    """Request model for manual OAuth cookie extraction"""
+    timeout: Optional[int] = Field(
+        default=600,
+        ge=60,
+        le=1800,
+        description="Timeout in seconds (60-1800, default: 600)"
+    )
+    callback_url: Optional[str] = Field(
+        default=None,
+        description="Optional webhook URL to notify on completion"
+    )
+
+
+class ManualOAuthResponse(BaseModel):
+    """Response model for manual OAuth cookie extraction"""
+    status: str
+    message: str
+    task_id: str
+    timeout_seconds: int
+    browser_url: Optional[str] = None
+
+
+class CookieInjectionRequestV2(BaseModel):
+    """Request model for injecting Grok cookies"""
+    cookies: List[Cookie]
+    user_agent: Optional[str] = None
+    remember_me: bool = True
+
+
+class CookieInjectionResponse(BaseModel):
+    """Response model for cookie injection"""
+    status: str
+    message: str
+    session_id: Optional[str] = None
+    cookies_count: int
+    saved_to: Optional[str] = None
+
+
+class ExtractionStatusResponse(BaseModel):
+    """Response model for extraction status"""
+    task_id: str
+    status: str
+    cookies_count: Optional[int] = None
+    extracted_at: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    error_message: Optional[str] = None
 
 @router.post("/login")
 async def login(request: LoginRequest):
@@ -340,4 +396,204 @@ async def grok_login(request: GrokLoginRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Login failed: {str(e)}"
+        )
+
+
+# ==================== Manual OAuth Endpoints ====================
+
+@router.post("/extract-grok-cookies-manual", response_model=ManualOAuthResponse)
+async def extract_grok_cookies_manual(request: ManualOAuthRequest):
+    """
+    Start semi-automated Grok cookie extraction with manual OAuth.
+    
+    This endpoint triggers a browser-based extraction process where:
+    1. A visible browser window opens to grok.com
+    2. User manually completes Google OAuth login
+    3. Cookies are automatically extracted and saved
+    
+    The extraction runs asynchronously - use the returned task_id
+    to poll the status endpoint.
+    
+    - **timeout**: Maximum time to wait for login (60-1800 seconds)
+    - **callback_url**: Optional webhook URL for completion notification
+    """
+    from config import config
+    
+    logging.info(f"Starting manual OAuth cookie extraction with {request.timeout}s timeout")
+    
+    # Create a task for tracking
+    task_id = ExtractionTask.create_task(timeout=request.timeout)
+    
+    try:
+        # Run the extraction in a background task
+        async def run_extraction():
+            try:
+                result = await extract_grok_cookies_with_manual_oauth(
+                    timeout_seconds=request.timeout,
+                    callback_url=request.callback_url
+                )
+                
+                if result["status"] == "success":
+                    ExtractionTask.update_task(task_id, "completed", result)
+                elif result["status"] == "cancelled":
+                    ExtractionTask.update_task(task_id, "cancelled", result)
+                else:
+                    ExtractionTask.update_task(task_id, "failed", result)
+                    
+            except Exception as e:
+                logging.error(f"Extraction task failed: {str(e)}")
+                ExtractionTask.update_task(
+                    task_id, 
+                    "failed",
+                    {"status": "error", "error_message": str(e)}
+                )
+        
+        # Start the extraction in background
+        asyncio.create_task(run_extraction())
+        
+        return ManualOAuthResponse(
+            status="waiting_for_login",
+            message="浏览器已启动，请完成 Google 登录授权...",
+            task_id=task_id,
+            timeout_seconds=request.timeout
+        )
+        
+    except Exception as e:
+        logging.error(f"Failed to start manual OAuth extraction: {str(e)}")
+        ExtractionTask.delete_task(task_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start extraction: {str(e)}"
+        )
+
+
+@router.post("/inject-grok-cookies", response_model=CookieInjectionResponse)
+async def inject_grok_cookies(request: CookieInjectionRequestV2):
+    """
+    Inject previously extracted Grok cookies to create a session.
+    
+    Use this endpoint after running the manual extraction script or
+    extracting cookies from the browser. The cookies will be saved
+    to file and a session will be created.
+    
+    - **cookies**: List of cookie objects
+    - **user_agent**: Optional user agent string
+    - **remember_me**: Whether to persist the session
+    """
+    logging.info(f"Injecting {len(request.cookies)} cookies")
+    
+    try:
+        # Convert cookies to dict format
+        cookie_dicts = [c.dict() for c in request.cookies]
+        
+        # Save cookies to file
+        save_path = save_cookies_to_file(cookie_dicts)
+        
+        # Create session
+        session_id = str(uuid.uuid4())
+        session_manager = SessionManager()
+        success, cookie_count = await session_manager.inject_cookies(
+            cookie_dicts,
+            request.user_agent,
+            request.remember_me
+        )
+        
+        if success:
+            logging.info(f"Successfully injected {cookie_count} cookies")
+            return CookieInjectionResponse(
+                status="success",
+                message="Cookies injected successfully",
+                session_id=session_id,
+                cookies_count=cookie_count,
+                saved_to=save_path
+            )
+        else:
+            raise HTTPException(
+                status_code=401,
+                detail="Session creation failed. Cookies may be invalid or expired."
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Cookie injection failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cookie injection failed: {str(e)}"
+        )
+
+
+@router.get("/extract-grok-status/{task_id}", response_model=ExtractionStatusResponse)
+async def get_extraction_status(task_id: str):
+    """
+    Get the status of a manual cookie extraction task.
+    
+    Use the task_id returned from /extract-grok-cookies-manual to
+    poll for completion status.
+    
+    Possible statuses:
+    - **waiting_for_login**: Extraction started, waiting for user login
+    - **completed**: Cookies extracted successfully
+    - **failed**: Extraction failed
+    - **cancelled**: User cancelled the operation
+    """
+    task = ExtractionTask.get_task(task_id)
+    
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task not found: {task_id}"
+        )
+    
+    result = task.get("result")
+    
+    if task["status"] == "completed" and result:
+        return ExtractionStatusResponse(
+            task_id=task_id,
+            status="completed",
+            cookies_count=result.get("cookie_count"),
+            extracted_at=result.get("extracted_at"),
+            duration_seconds=result.get("duration_seconds")
+        )
+    elif task["status"] == "failed" and result:
+        return ExtractionStatusResponse(
+            task_id=task_id,
+            status="failed",
+            error_message=result.get("error_message", "Unknown error")
+        )
+    elif task["status"] == "cancelled":
+        return ExtractionStatusResponse(
+            task_id=task_id,
+            status="cancelled",
+            error_message="Operation was cancelled by user"
+        )
+    else:
+        return ExtractionStatusResponse(
+            task_id=task_id,
+            status=task["status"]
+        )
+
+
+@router.get("/load-grok-cookies")
+async def load_grok_cookies():
+    """
+    Load previously saved Grok cookies from file.
+    
+    Returns the cookies that were saved by a previous extraction.
+    """
+    try:
+        cookies = load_cookies_from_file()
+        
+        return {
+            "status": "success",
+            "message": f"Loaded {len(cookies)} cookies",
+            "cookies": cookies,
+            "cookie_count": len(cookies)
+        }
+        
+    except Exception as e:
+        logging.error(f"Failed to load cookies: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load cookies: {str(e)}"
         )
