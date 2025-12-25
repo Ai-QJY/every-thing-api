@@ -16,7 +16,7 @@ class Config(BaseSettings):
     SESSION_DIR: str = "/home/engine/project/sessions"
     
     # AI Website URLs
-    GROK_URL: str = "https://grok.ai"
+    GROK_URL: str = "https://grok.com"
     X_AI_URL: str = "https://x.ai"
     
     # API settings

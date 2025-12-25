@@ -144,72 +144,114 @@ class SessionManager:
             current_url = self.page.url
             logging.info(f"Checking login success at URL: {current_url}")
             
+            # Give the page a moment to fully load after cookie injection
+            await asyncio.sleep(1)
+            
             # Check if we're on a login/auth page (indicates not logged in)
-            if any(keyword in current_url.lower() for keyword in ["login", "signin", "sign-in", "auth", "oauth"]):
+            if any(keyword in current_url.lower() for keyword in ["login", "signin", "sign-in", "auth/", "oauth/"]):
                 logging.info("Still on login/auth page - not logged in")
                 return False
             
-            # Check for common Grok logged-in indicators
-            # Try multiple selectors that might indicate a logged-in state
-            login_indicators = [
-                # Chat interface elements
-                'textarea[placeholder*="Ask"]',
-                'textarea[placeholder*="Message"]',
-                'div[class*="chat"]',
-                'div[class*="conversation"]',
-                'button[aria-label*="Send"]',
-                # User profile/menu elements
-                'button[aria-label*="Profile"]',
-                'button[aria-label*="User"]',
-                '[data-testid*="profile"]',
-                '[data-testid*="user"]',
-                # Navigation elements that appear when logged in
-                'nav[class*="main"]',
-                '[class*="sidebar"]',
-            ]
-            
-            for selector in login_indicators:
-                try:
-                    element = await self.page.query_selector(selector, timeout=2000)
-                    if element:
-                        logging.info(f"Found logged-in indicator: {selector}")
-                        return True
-                except Exception:
-                    continue
-            
-            # Check for "Sign in" or "Login" buttons (indicates not logged in)
-            login_buttons = await self.page.query_selector_all('button:has-text("Sign"), button:has-text("Log"), a:has-text("Sign"), a:has-text("Log")')
-            if login_buttons:
-                for button in login_buttons:
+            # If we're on the main Grok domain, that's a strong indicator
+            if "grok.com" in current_url or "grok.x.ai" in current_url:
+                # Check for common Grok logged-in indicators
+                # Try multiple selectors that might indicate a logged-in state
+                login_indicators = [
+                    # Chat interface elements (Grok-specific)
+                    'textarea',
+                    'input[type="text"]',
+                    'div[role="textbox"]',
+                    'textarea[placeholder*="Ask"]',
+                    'textarea[placeholder*="Message"]',
+                    'textarea[placeholder*="Type"]',
+                    'div[class*="chat"]',
+                    'div[class*="conversation"]',
+                    'button[aria-label*="Send"]',
+                    # User profile/menu elements
+                    'button[aria-label*="Profile"]',
+                    'button[aria-label*="User"]',
+                    'button[aria-label*="Menu"]',
+                    '[data-testid*="profile"]',
+                    '[data-testid*="user"]',
+                    '[data-testid*="menu"]',
+                    # Navigation elements that appear when logged in
+                    'nav',
+                    'aside',
+                    '[class*="sidebar"]',
+                    '[class*="navigation"]',
+                    # Avatar or user icon
+                    'img[alt*="avatar"]',
+                    'img[alt*="profile"]',
+                    '[class*="avatar"]',
+                ]
+                
+                for selector in login_indicators:
                     try:
-                        text = await button.inner_text()
-                        if "sign in" in text.lower() or "log in" in text.lower():
-                            logging.info(f"Found login button: {text} - not logged in")
-                            return False
+                        element = await self.page.wait_for_selector(selector, timeout=3000, state="attached")
+                        if element:
+                            logging.info(f"✅ Found logged-in indicator: {selector}")
+                            return True
                     except Exception:
                         continue
             
+            # Check for "Sign in" or "Login" buttons (indicates not logged in)
+            try:
+                login_button_selectors = [
+                    'button:has-text("Sign in")',
+                    'button:has-text("Log in")',
+                    'a:has-text("Sign in")',
+                    'a:has-text("Log in")',
+                    'button:has-text("Login")',
+                ]
+                for selector in login_button_selectors:
+                    try:
+                        button = await self.page.wait_for_selector(selector, timeout=1000)
+                        if button:
+                            text = await button.inner_text()
+                            logging.info(f"❌ Found login button: {text} - not logged in")
+                            return False
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            
             # If URL suggests we're in the app and no login buttons found, consider logged in
-            if any(keyword in current_url.lower() for keyword in ["chat", "conversation", "app", "dashboard", "home"]):
-                logging.info(f"URL suggests logged in state: {current_url}")
-                return True
+            if any(keyword in current_url.lower() for keyword in ["chat", "conversation", "app", "dashboard", "home", "grok.com"]):
+                logging.info(f"✅ URL suggests logged in state: {current_url}")
+                
+                # Additional check: verify we have important cookies
+                cookies = await self.context.cookies()
+                if len(cookies) > 0:
+                    logging.info(f"✅ Found {len(cookies)} cookies in context")
+                    return True
             
             # Check cookies for session indicators
             cookies = await self.context.cookies()
+            logging.info(f"🍪 Total cookies in context: {len(cookies)}")
+            
+            # Log cookie names for debugging
+            cookie_names = [c.get("name", "") for c in cookies]
+            logging.info(f"🍪 Cookie names: {', '.join(cookie_names[:10])}")
+            
             session_cookies = [c for c in cookies if any(
                 keyword in c.get("name", "").lower() 
-                for keyword in ["session", "auth", "token", "sid"]
+                for keyword in ["session", "auth", "token", "sid", "_ga", "ct0", "kdt"]
             )]
             
             if session_cookies:
-                logging.info(f"Found {len(session_cookies)} session-related cookies")
+                logging.info(f"✅ Found {len(session_cookies)} session-related cookies")
                 return True
             
-            logging.info("No definitive login indicators found")
+            # If we have a significant number of cookies and we're on grok.com, assume logged in
+            if len(cookies) >= 3 and "grok.com" in current_url:
+                logging.info(f"✅ Have {len(cookies)} cookies and on grok.com - assuming logged in")
+                return True
+            
+            logging.warning("⚠️ No definitive login indicators found")
             return False
             
         except Exception as e:
-            logging.error(f"Error checking login success: {str(e)}")
+            logging.error(f"❌ Error checking login success: {str(e)}")
             return False
             
     def has_valid_session(self) -> bool:
@@ -409,38 +451,62 @@ class SessionManager:
             else:
                 self.page = await self.context.new_page()
             
-            # IMPORTANT: Navigate to the target domain FIRST before injecting cookies
-            # This ensures the browser context is properly initialized with the domain
-            logging.info("Navigating to target domain before cookie injection...")
-            await self.page.goto(config.GROK_URL, timeout=config.BROWSER_TIMEOUT)
-            await self.page.wait_for_load_state("domcontentloaded")
+            # IMPORTANT: Visit relevant domains BEFORE injecting cookies.
+            # Some browsers/cookie stores can behave unexpectedly if a domain has never been visited.
+            cookie_domains = {
+                str(c.get("domain", "")).lstrip(".")
+                for c in cookies
+                if c.get("domain")
+            }
+
+            bootstrap_urls: List[str] = []
+            if any("grok.com" in d for d in cookie_domains):
+                bootstrap_urls.append("https://grok.com")
+            if any("x.ai" in d for d in cookie_domains):
+                bootstrap_urls.append(config.X_AI_URL)
+            if any("grok.ai" in d for d in cookie_domains):
+                bootstrap_urls.append("https://grok.ai")
+
+            if not bootstrap_urls:
+                bootstrap_urls.append(config.GROK_URL)
+
+            logging.info(f"Bootstrap domains before cookie injection: {bootstrap_urls}")
+            for url in bootstrap_urls:
+                logging.info(f"Navigating to {url} before cookie injection...")
+                await self.page.goto(url, timeout=config.BROWSER_TIMEOUT)
+                await self.page.wait_for_load_state("domcontentloaded")
             
             # Filter out expired cookies and prepare cookies for injection
             current_timestamp = datetime.now().timestamp()
             valid_cookies = []
             
             for cookie in cookies:
-                # Check if cookie is expired
+                # Normalize/validate expires
                 expires = cookie.get("expires")
-                if expires:
-                    # expires can be in seconds (unix timestamp) or -1 for session cookies
-                    if expires > 0 and expires < current_timestamp:
-                        logging.debug(f"Skipping expired cookie: {cookie['name']}")
-                        continue
-                
-                # Normalize domain - Playwright requires leading dot for domain cookies
-                domain = cookie.get("domain", "")
-                # Keep the domain as-is if it already has a leading dot
-                # Otherwise, add it if the domain looks like a domain cookie (grok.com, x.ai, etc.)
-                if domain:
-                    # Remove any existing leading dot and re-add it for consistency
-                    # This handles both ".grok.com" and "grok.com" formats
-                    domain = domain.lstrip(".")
-                    # For domain cookies (not exact host), add leading dot
-                    if "grok.com" in domain or "x.ai" in domain:
-                        domain = "." + domain
-                
-                cookie_data = {
+                if isinstance(expires, (int, float)):
+                    # Some exports store expiry in milliseconds
+                    if expires > 10_000_000_000:
+                        expires = expires / 1000
+                else:
+                    expires = None
+
+                # Check if cookie is expired
+                if expires and expires > 0 and expires < current_timestamp:
+                    logging.debug(f"Skipping expired cookie: {cookie.get('name', '')}")
+                    continue
+
+                # Normalize domain
+                domain_raw = str(cookie.get("domain", "")).strip()
+                if not domain_raw:
+                    logging.debug(f"Skipping cookie without domain: {cookie.get('name', '')}")
+                    continue
+
+                had_leading_dot = domain_raw.startswith(".")
+                domain = domain_raw.lstrip(".")
+                if had_leading_dot:
+                    domain = "." + domain
+
+                cookie_data: Dict[str, Any] = {
                     "name": cookie["name"],
                     "value": cookie["value"],
                     "domain": domain,
@@ -448,16 +514,24 @@ class SessionManager:
                     "httpOnly": cookie.get("httpOnly", False),
                     "secure": cookie.get("secure", False),
                 }
-                
+
                 # Add expires only if it's valid
                 if expires and expires > 0:
-                    cookie_data["expires"] = expires
-                
-                # Add sameSite if present
-                sameSite = cookie.get("sameSite")
-                if sameSite:
-                    cookie_data["sameSite"] = sameSite
-                
+                    cookie_data["expires"] = float(expires)
+
+                # Add sameSite if present (normalize common formats)
+                same_site = cookie.get("sameSite")
+                if same_site:
+                    same_site_str = str(same_site)
+                    same_site_norm = {
+                        "lax": "Lax",
+                        "strict": "Strict",
+                        "none": "None",
+                        "no_restriction": "None",
+                    }.get(same_site_str.lower())
+                    if same_site_norm:
+                        cookie_data["sameSite"] = same_site_norm
+
                 valid_cookies.append(cookie_data)
             
             logging.info(f"Injecting {len(valid_cookies)} valid cookies (filtered from {len(cookies)} total)")
@@ -478,18 +552,37 @@ class SessionManager:
             if failed_cookies:
                 logging.warning(f"Failed to inject {len(failed_cookies)} cookies: {', '.join(failed_cookies)}")
             
-            # Reload the page to apply the cookies
-            logging.info("Reloading page to apply injected cookies...")
-            await self.page.reload(wait_until="networkidle")
+            # Navigate to a suitable URL to apply the cookies (prefer Grok UI)
+            validation_url = config.GROK_URL
+            if not any("grok.com" in d for d in cookie_domains):
+                if any("grok.ai" in d for d in cookie_domains):
+                    validation_url = "https://grok.ai"
+                elif any("x.ai" in d for d in cookie_domains):
+                    validation_url = config.X_AI_URL
+
+            logging.info(f"🔄 Navigating to {validation_url} to apply injected cookies...")
+            await self.page.goto(validation_url, wait_until="networkidle", timeout=30000)
             
-            # Wait a bit for any JavaScript to execute
-            await asyncio.sleep(2)
+            # Wait for page to fully render and JavaScript to execute
+            logging.info("⏳ Waiting for page to fully render...")
+            await asyncio.sleep(3)
+            
+            # Log current URL and page title for debugging
+            current_url = self.page.url
+            page_title = await self.page.title()
+            logging.info(f"📍 Current URL: {current_url}")
+            logging.info(f"📄 Page title: {page_title}")
+            
+            # Check cookies in context
+            context_cookies = await self.context.cookies()
+            logging.info(f"🍪 Cookies in context after injection: {len(context_cookies)}")
             
             # Check if the session is valid
+            logging.info("🔍 Validating login state...")
             logged_in = await self._check_login_success()
             
             if logged_in and cookie_count > 0:
-                logging.info(f"Cookie injection successful! {cookie_count} cookies injected, session is valid")
+                logging.info(f"✅ Cookie injection successful! {cookie_count} cookies injected, session is valid")
                 
                 # Save session information
                 session_data = {
@@ -507,8 +600,11 @@ class SessionManager:
                 
                 return True, cookie_count
             else:
-                logging.error(f"Cookie injection validation failed. Logged in: {logged_in}, Cookie count: {cookie_count}")
-                return False, 0
+                logging.error(f"❌ Cookie injection validation failed. Logged in: {logged_in}, Injected cookies: {cookie_count}")
+                logging.error(f"   URL: {current_url}")
+                logging.error(f"   Title: {page_title}")
+                logging.error(f"   Context cookies: {len(context_cookies)}")
+                return False, cookie_count
                 
         except Exception as e:
             logging.error(f"Cookie injection failed: {str(e)}")
