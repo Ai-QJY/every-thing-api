@@ -312,7 +312,18 @@ playwright install chromium
 playwright install
 ```
 
-### 问题 2：登录后 Cookie 未导出
+### 问题 2：浏览器看起来像无痕/每次都要重新登录
+
+**说明：**
+手动 OAuth 模式默认使用一个 **持久化** 的浏览器用户数据目录（`data/grok_oauth_profile`），用于保存登录状态，避免每次都像“无痕/访客”一样重新登录。
+
+**解决方案：**
+1. 首次运行请完成一次 Google 登录，之后会自动复用登录状态
+2. 想“重置”登录状态：删除 `data/grok_oauth_profile` 目录
+3. 想自定义浏览器数据目录：设置环境变量 `GROK_OAUTH_USER_DATA_DIR`
+4. 想关闭持久化（每次都全新环境）：设置 `GROK_OAUTH_PERSISTENT_CONTEXT=false`
+
+### 问题 3：登录后 Cookie 未导出
 
 **可能原因：**
 1. 页面 URL 未正确变化
@@ -324,7 +335,7 @@ playwright install
 2. 确保完成整个 OAuth 流程
 3. 检查网络连接
 
-### 问题 3：Cookie 注入后无法使用
+### 问题 4：Cookie 注入后无法使用
 
 **可能原因：**
 1. Cookie 已过期
@@ -336,14 +347,14 @@ playwright install
 2. 检查 Cookie 的 domain 字段
 3. 确保使用相同的浏览器配置
 
-### 问题 4：超时时间设置不合理
+### 问题 5：超时时间设置不合理
 
 **建议设置：**
 - **首次登录**：600 秒（10 分钟）
 - **后续登录**：300 秒（5 分钟）
 - **快速测试**：120 秒（2 分钟）
 
-### 问题 5：API 返回 404 Task not found
+### 问题 6：API 返回 404 Task not found
 
 **可能原因：**
 1. task_id 已过期

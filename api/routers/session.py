@@ -565,7 +565,7 @@ async def get_extraction_status(task_id: str):
         return ExtractionStatusResponse(
             task_id=task_id,
             status="cancelled",
-            error_message="Operation was cancelled by user"
+            error_message=(result or {}).get("error_message", "Operation was cancelled")
         )
     else:
         return ExtractionStatusResponse(
