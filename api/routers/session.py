@@ -520,15 +520,25 @@ async def inject_grok_cookies(request: CookieInjectionRequestV2):
                 saved_to=save_path
             )
         else:
+            # Check for expired cookies
+            from datetime import datetime
+            current_ts = datetime.now().timestamp()
+            expired_count = sum(1 for c in cookie_dicts if c.get("expires") and 0 < c.get("expires") < current_ts)
+            
             error_msg = (
-                f"Session validation failed after injecting cookies. "
-                f"Attempted to inject {len(cookie_dicts)} cookies, successfully injected {cookie_count}. "
+                f"Session validation failed after cookie injection.\n"
+                f"Injected: {cookie_count}/{len(cookie_dicts)} cookies\n"
+                f"Expired: {expired_count} cookies\n\n"
                 f"Possible causes:\n"
-                f"1. Cookies may be expired or invalid\n"
-                f"2. The session may have been invalidated on the server\n"
-                f"3. The cookies may be from a different domain\n"
-                f"4. Additional authentication may be required\n\n"
-                f"Please try extracting fresh cookies from an active session."
+                f"1. Cookies are expired (check extraction time)\n"
+                f"2. Server-side session invalidated\n"
+                f"3. Login verification logic needs adjustment\n"
+                f"4. Wrong domain - ensure cookies are from grok.com\n\n"
+                f"Suggestions:\n"
+                f"- Extract fresh cookies (< 1 hour old)\n"
+                f"- Verify cookies are from an active grok.com session\n"
+                f"- Check server logs for detailed validation info\n"
+                f"- If cookies are valid, this might be a detection issue - check logs"
             )
             logging.error(error_msg)
             raise HTTPException(

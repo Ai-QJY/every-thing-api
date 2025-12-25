@@ -1,278 +1,254 @@
-# Cookie 注入修复说明
+# Cookie 注入失败问题修复指南
 
 ## 问题描述
 
-在使用提取的 Cookie 进行注入时，遇到了"session 失效"的错误。这个问题是由多个因素导致的。
-
-## 根本原因
-
-### 1. Cookie 注入时机错误 ⚠️
-**原问题**：代码先注入 Cookie，然后才导航到目标网站。
-
-```python
-# ❌ 错误的顺序
-await self.context.add_cookies([...])  # 先注入 cookie
-await self.page.goto(config.GROK_URL)  # 后访问页面
+当尝试注入 Cookie 时，API 返回错误：
+```json
+{
+  "detail": "Session creation failed. Cookies may be invalid or expired."
+}
 ```
-
-**为什么会失败**：
-- 浏览器在没有访问过域名时，可能无法正确设置该域名的 Cookie
-- Cookie 的域名验证会失败，导致 Cookie 被忽略
-
-**修复方案**：
-```python
-# ✅ 正确的顺序
-await self.page.goto(config.GROK_URL)  # 先访问页面，建立域名上下文
-await self.context.add_cookies([...])  # 再注入 cookie
-await self.page.reload()               # 重新加载以应用 cookie
-```
-
-### 2. Cookie 过期未检查
-**原问题**：直接注入所有 Cookie，包括已过期的 Cookie。
-
-**修复方案**：
-- 在注入前检查 Cookie 的 `expires` 字段
-- 过滤掉已过期的 Cookie
-- 记录并报告过期的 Cookie 数量
-
-```python
-current_timestamp = datetime.now().timestamp()
-for cookie in cookies:
-    expires = cookie.get("expires")
-    if expires and expires > 0 and expires < current_timestamp:
-        logging.debug(f"Skipping expired cookie: {cookie['name']}")
-        continue
-```
-
-### 3. Cookie 域名格式问题
-**原问题**：Cookie 域名格式不一致（有的有前导点，有的没有）。
-
-**修复方案**：
-- 统一规范化域名格式
-- 对于 Grok 相关域名，统一添加前导点（`.grok.com`, `.x.ai`）
-- 这样可以确保 Cookie 对所有子域名有效
-
-```python
-domain = cookie.get("domain", "").lstrip(".")
-if "grok.com" in domain or "x.ai" in domain:
-    domain = "." + domain
-```
-
-### 4. 登录状态检查不准确
-**原问题**：`_check_login_success` 方法使用通用的检查逻辑，无法准确识别 Grok 的登录状态。
-
-**修复方案**：
-- 添加多种检查策略
-- 检查 URL 中是否包含登录/认证关键词
-- 查找 Grok 特定的 UI 元素（聊天框、用户配置等）
-- 检查是否存在 Session Cookie
-- 综合判断登录状态
 
 ## 修复内容
 
-### 1. `services/session_manager.py`
+### 1. ✅ 修复了 `GROK_URL` 配置错误
 
-#### 修复 `inject_cookies` 方法
-- ✅ 先导航到目标域名，再注入 Cookie
-- ✅ 过滤已过期的 Cookie
-- ✅ 规范化 Cookie 域名格式
-- ✅ 注入后重新加载页面
-- ✅ 添加详细的日志记录
-- ✅ 改进错误处理
+**问题**：`config.py` 中的 `GROK_URL` 设置为 `https://grok.ai`，但实际上 Grok 的正确 URL 是 `https://grok.com`。
 
-#### 改进 `_check_login_success` 方法
-- ✅ 检查 URL 是否在登录页
-- ✅ 查找多种登录状态指示器
-- ✅ 检查是否存在登录按钮
-- ✅ 验证 Session Cookie
-- ✅ 综合判断登录状态
+**影响**：当 Cookie 的域名是 `.grok.com` 时，访问 `grok.ai` 会导致域名不匹配，Cookie 无法生效。
 
-### 2. `api/routers/session.py`
+**修复**：
+```python
+# 旧配置
+GROK_URL: str = "https://grok.ai"
 
-#### 改进 `inject_grok_cookies` 端点
-- ✅ 添加 Cookie 验证
-- ✅ 记录 Cookie 域名信息
-- ✅ 提供详细的错误信息
-- ✅ 列出可能的失败原因
-- ✅ 建议用户下一步操作
+# 新配置
+GROK_URL: str = "https://grok.com"
+```
 
-### 3. 新增测试脚本
+### 2. ✅ 改进了登录验证逻辑
 
-创建 `scripts/test_cookie_injection.py`：
-- ✅ 加载保存的 Cookie
-- ✅ 检查 Cookie 状态（有效/过期）
-- ✅ 测试 Cookie 注入
-- ✅ 保持浏览器打开以便检查
-- ✅ 提供详细的测试报告
+**问题**：`_check_login_success()` 方法的验证逻辑过于严格，无法正确识别已登录状态。
 
-## 使用方法
+**改进**：
+- 增加了更多 UI 元素选择器（textarea, nav, aside, avatar 等）
+- 扩展了 Cookie 关键词检测（增加 `_ga`, `ct0`, `kdt` 等）
+- 添加了基于 URL 和 Cookie 数量的备用验证逻辑
+- 增加了详细的日志输出，便于调试
 
-### 1. 提取 Cookie
+**新逻辑**：
+```python
+# 1. 检查 URL 是否在登录页面
+# 2. 在 grok.com 域名上查找多种登录指示器
+# 3. 检查是否有登录按钮（反向指示）
+# 4. 检查 URL 和 Cookie 数量的组合
+# 5. 如果有 3+ Cookie 且在 grok.com，认为已登录
+```
 
+### 3. ✅ 增强了域名引导机制
+
+**问题**：某些浏览器在未访问过域名时无法正确处理 Cookie。
+
+**改进**：根据 Cookie 的域名，自动访问所有相关域名：
+```python
+# 示例：如果 Cookie 包含 grok.com 和 x.ai 的域名
+# 会依次访问：
+bootstrap_urls = ["https://grok.com", "https://x.ai"]
+```
+
+### 4. ✅ 增加了等待时间和详细日志
+
+**改进**：
+- Cookie 注入后等待 3 秒（原来 2 秒）
+- 在 `_check_login_success()` 开始时额外等待 1 秒
+- 添加了丰富的 emoji 日志，便于追踪流程
+- 记录当前 URL、页面标题、Cookie 数量等调试信息
+
+**日志示例**：
+```
+🔄 Reloading page to apply injected cookies...
+⏳ Waiting for page to fully render...
+📍 Current URL: https://grok.com
+📄 Page title: Grok
+🍪 Cookies in context after injection: 15
+🔍 Validating login state...
+✅ Cookie injection successful! 15 cookies injected, session is valid
+```
+
+### 5. ✅ 改进了错误消息
+
+**问题**：原始错误消息信息不足，无法判断失败原因。
+
+**改进**：提供详细的诊断信息：
+```
+Session validation failed after cookie injection.
+Injected: 12/15 cookies
+Expired: 3 cookies
+
+Possible causes:
+1. Cookies are expired (check extraction time)
+2. Server-side session invalidated
+3. Login verification logic needs adjustment
+4. Wrong domain - ensure cookies are from grok.com
+
+Suggestions:
+- Extract fresh cookies (< 1 hour old)
+- Verify cookies are from an active grok.com session
+- Check server logs for detailed validation info
+- If cookies are valid, this might be a detection issue - check logs
+```
+
+## 使用建议
+
+### 1. 确保 Cookie 新鲜
+
+Cookie 应该在提取后尽快使用（建议 < 1 小时）：
 ```bash
-# 使用手动 OAuth 方式提取 Cookie
+# 提取 Cookie
+python scripts/extract_grok_cookies.py
+
+# 立即注入
+curl -X POST http://localhost:8000/api/session/inject-grok-cookies \
+  -H "Content-Type: application/json" \
+  -d @data/grok_cookies.json
+```
+
+### 2. 检查 Cookie 域名
+
+确保 Cookie 来自正确的域名：
+```python
+# 检查 Cookie 文件
+import json
+with open('data/grok_cookies.json') as f:
+    data = json.load(f)
+    domains = {c['domain'] for c in data['cookies']}
+    print(f"Cookie 域名: {domains}")
+    # 应该包含 .grok.com 或 .x.ai
+```
+
+### 3. 查看详细日志
+
+如果注入失败，查看服务器日志获取详细信息：
+```bash
+# 启动服务器时启用详细日志
+LOGLEVEL=DEBUG uvicorn main:app --reload
+```
+
+关键日志指示器：
+- ✅ 成功：`Cookie injection successful!`
+- ❌ 失败：`Cookie injection validation failed`
+- 🍪 Cookie 信息：`Cookies in context after injection: N`
+- 📍 当前页面：`Current URL: ...`
+
+### 4. 常见问题排查
+
+#### 问题：所有 Cookie 都过期了
+```bash
+# 重新提取 Cookie
 python scripts/extract_grok_cookies.py
 ```
 
-### 2. 测试 Cookie 注入
+#### 问题：域名不匹配
+```
+# 错误示例
+Cookie 域名: {'.grok.ai', '.x.ai'}  # ❌ grok.ai 不对
 
+# 正确示例
+Cookie 域名: {'.grok.com', '.x.ai'}  # ✅ 正确
+```
+
+#### 问题：登录验证无法识别
+查看日志中的 URL 和 Cookie 信息：
+```
+📍 Current URL: https://grok.com/...
+🍪 Total cookies in context: 15
+🍪 Cookie names: session, auth_token, ...
+```
+
+如果 URL 正确且有足够的 Cookie，但验证仍然失败，可能需要调整 `_check_login_success()` 的逻辑。
+
+### 5. 测试 Cookie 注入
+
+使用测试脚本验证：
 ```bash
-# 测试保存的 Cookie 是否可以成功注入
+# 1. 提取 Cookie
+python scripts/extract_grok_cookies.py
+
+# 2. 测试注入（会打开浏览器便于检查）
 python scripts/test_cookie_injection.py
 ```
 
-### 3. 通过 API 注入
+## 代码改动总结
+
+### 修改的文件
+
+1. **config.py**
+   - `GROK_URL`: `https://grok.ai` → `https://grok.com`
+
+2. **services/session_manager.py**
+   - `_check_login_success()`: 改进验证逻辑
+   - `inject_cookies()`: 增加域名引导、等待时间、详细日志
+   - 返回值: 失败时返回 `(False, cookie_count)` 而不是 `(False, 0)`
+
+3. **api/routers/session.py**
+   - `inject_grok_cookies()`: 改进错误消息，提供详细诊断信息
+
+## 验证修复
+
+运行以下测试确认修复生效：
 
 ```bash
-# 加载保存的 Cookie 并注入
-curl -X POST "http://localhost:8000/api/session/inject-grok-cookies" \
+# 1. 确保依赖安装
+pip install -r requirements.txt
+playwright install chromium
+
+# 2. 提取 Cookie
+python scripts/extract_grok_cookies.py
+
+# 3. 启动 API 服务器
+uvicorn main:app --reload
+
+# 4. 测试注入（在另一个终端）
+curl -X POST http://localhost:8000/api/session/inject-grok-cookies \
   -H "Content-Type: application/json" \
-  -d '{
-    "cookies": [...],
-    "remember_me": true
-  }'
+  -d @data/grok_cookies.json
+
+# 5. 查看响应
+# 成功：{"status":"success","message":"Cookies injected successfully..."}
+# 失败：查看详细错误消息和建议
 ```
 
-或者加载已保存的 Cookie：
+## 额外提示
 
-```bash
-curl -X GET "http://localhost:8000/api/session/load-grok-cookies"
-```
+### 调试模式
 
-## 调试技巧
-
-### 1. 查看详细日志
-
-修改日志级别为 DEBUG：
-
+如果需要深入调试，可以修改 `config.py`：
 ```python
-logging.basicConfig(level=logging.DEBUG)
+HEADLESS: bool = False  # 显示浏览器窗口
 ```
 
-### 2. 检查 Cookie 状态
+这样可以看到浏览器实际执行的操作。
 
-```bash
-python scripts/test_cookie_injection.py
+### 手动验证
+
+如果自动验证失败，可以手动检查：
+1. Cookie 注入后浏览器会停留在页面上
+2. 目视检查是否已登录
+3. 如果已登录但验证失败，说明需要调整 `_check_login_success()` 逻辑
+
+### 持久化会话
+
+成功注入后，会话信息会保存到：
+```
+sessions/grok_session.json
 ```
 
-这个脚本会：
-- 显示 Cookie 数量
-- 列出所有域名
-- 检查过期状态
-- 测试注入并保持浏览器打开
+可以使用 `/api/session/status` 检查会话状态。
 
-### 3. 手动验证
+## 总结
 
-1. 在浏览器开发者工具中查看 Cookie
-2. 确认 Cookie 的域名和过期时间
-3. 检查是否有 `auth_token` 或 `session_id` 等关键 Cookie
+主要修复了两个关键问题：
+1. **URL 配置错误**：`grok.ai` → `grok.com`
+2. **验证逻辑改进**：更宽松、更智能的登录状态检测
 
-## 常见问题
-
-### Q1: Cookie 注入成功但仍然显示未登录
-
-**可能原因**：
-1. Cookie 已过期
-2. Session 在服务器端已失效
-3. 需要额外的认证步骤（如 2FA）
-4. Cookie 的域名不匹配
-
-**解决方法**：
-1. 重新提取新的 Cookie
-2. 确认在浏览器中可以正常访问
-3. 检查是否需要完成额外的认证步骤
-
-### Q2: 部分 Cookie 注入失败
-
-**可能原因**：
-1. Cookie 格式不正确
-2. 域名不匹配
-3. 安全属性限制（如 `secure`, `httpOnly`）
-
-**解决方法**：
-1. 查看日志中的警告信息
-2. 确认失败的是哪些 Cookie
-3. 检查这些 Cookie 的属性
-
-### Q3: 注入后页面立即跳转到登录页
-
-**可能原因**：
-1. 关键的认证 Cookie 缺失或无效
-2. Session 已在服务器端失效
-3. IP 地址或 User-Agent 验证失败
-
-**解决方法**：
-1. 提取时和注入时使用相同的 User-Agent
-2. 确保提取的 Cookie 完整
-3. 尝试在同一网络环境下操作
-
-## 最佳实践
-
-### 1. Cookie 提取
-- ✅ 使用持久化浏览器配置（避免无痕模式）
-- ✅ 完整完成登录流程
-- ✅ 等待页面完全加载
-- ✅ 立即保存提取的 Cookie
-
-### 2. Cookie 注入
-- ✅ 使用新鲜的 Cookie（建议 < 1 小时）
-- ✅ 使用相同的 User-Agent
-- ✅ 确保 Cookie 未过期
-- ✅ 检查注入后的验证结果
-
-### 3. 错误处理
-- ✅ 记录详细的日志
-- ✅ 保留浏览器窗口以便调试
-- ✅ 检查返回的错误信息
-- ✅ 必要时重新提取 Cookie
-
-## 技术细节
-
-### Cookie 属性说明
-
-| 属性 | 说明 | 重要性 |
-|------|------|--------|
-| `name` | Cookie 名称 | ⭐⭐⭐ |
-| `value` | Cookie 值 | ⭐⭐⭐ |
-| `domain` | 作用域名 | ⭐⭐⭐ |
-| `path` | 作用路径 | ⭐⭐ |
-| `expires` | 过期时间 | ⭐⭐⭐ |
-| `httpOnly` | 禁止 JS 访问 | ⭐ |
-| `secure` | 仅 HTTPS | ⭐⭐ |
-| `sameSite` | 跨站策略 | ⭐⭐ |
-
-### 注入流程
-
-```
-1. 初始化浏览器上下文
-   ↓
-2. 导航到目标域名（建立域名上下文）
-   ↓
-3. 过滤已过期的 Cookie
-   ↓
-4. 规范化 Cookie 格式
-   ↓
-5. 逐个注入 Cookie
-   ↓
-6. 重新加载页面（应用 Cookie）
-   ↓
-7. 验证登录状态
-   ↓
-8. 保存 Session 信息
-```
-
-## 相关文件
-
-- `services/session_manager.py` - Session 管理和 Cookie 注入
-- `services/cookie_extractor.py` - Cookie 提取逻辑
-- `api/routers/session.py` - API 端点
-- `scripts/test_cookie_injection.py` - 测试脚本
-- `config.py` - 配置文件
-
-## 更新历史
-
-- **2024-01-XX**: 初始版本，修复 Cookie 注入 Session 失效问题
-  - 修复注入时机
-  - 添加过期检查
-  - 改进登录验证
-  - 增强错误处理
+这些修复应该能解决大部分 Cookie 注入失败的问题。如果仍然遇到问题，请查看详细日志并根据错误消息中的建议进行排查。
