@@ -29,6 +29,10 @@ class Config(BaseSettings):
     GROK_LOGIN_TIMEOUT: int = 120  # Login operation timeout in seconds
     GROK_HEADLESS_MODE: bool = False  # Use headless browser for debugging
     
+    # Manual OAuth settings (for semi-automated extraction)
+    GROK_OAUTH_TIMEOUT: int = 600  # Wait for user login timeout (10 minutes)
+    GROK_COOKIE_FILE_PATH: str = "data/grok_cookies.json"  # Cookie storage path
+    
     # OAuth settings
     OAUTH_GOOGLE_CLIENT_ID: str = ""
     OAUTH_GOOGLE_CLIENT_SECRET: str = ""
