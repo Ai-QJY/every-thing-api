@@ -480,14 +480,26 @@ async def inject_grok_cookies(request: CookieInjectionRequestV2):
     - **user_agent**: Optional user agent string
     - **remember_me**: Whether to persist the session
     """
-    logging.info(f"Injecting {len(request.cookies)} cookies")
+    logging.info(f"Attempting to inject {len(request.cookies)} cookies")
     
     try:
+        # Validate cookies
+        if not request.cookies:
+            raise HTTPException(
+                status_code=400,
+                detail="No cookies provided for injection"
+            )
+        
         # Convert cookies to dict format
         cookie_dicts = [c.dict() for c in request.cookies]
         
+        # Log cookie domains for debugging
+        domains = set(c.get("domain", "") for c in cookie_dicts)
+        logging.info(f"Cookie domains: {domains}")
+        
         # Save cookies to file
         save_path = save_cookies_to_file(cookie_dicts)
+        logging.info(f"Cookies saved to: {save_path}")
         
         # Create session
         session_id = str(uuid.uuid4())
@@ -499,24 +511,35 @@ async def inject_grok_cookies(request: CookieInjectionRequestV2):
         )
         
         if success:
-            logging.info(f"Successfully injected {cookie_count} cookies")
+            logging.info(f"✅ Successfully injected {cookie_count} cookies, session is valid")
             return CookieInjectionResponse(
                 status="success",
-                message="Cookies injected successfully",
+                message=f"Cookies injected successfully. Session validated. Injected {cookie_count} cookies.",
                 session_id=session_id,
                 cookies_count=cookie_count,
                 saved_to=save_path
             )
         else:
+            error_msg = (
+                f"Session validation failed after injecting cookies. "
+                f"Attempted to inject {len(cookie_dicts)} cookies, successfully injected {cookie_count}. "
+                f"Possible causes:\n"
+                f"1. Cookies may be expired or invalid\n"
+                f"2. The session may have been invalidated on the server\n"
+                f"3. The cookies may be from a different domain\n"
+                f"4. Additional authentication may be required\n\n"
+                f"Please try extracting fresh cookies from an active session."
+            )
+            logging.error(error_msg)
             raise HTTPException(
                 status_code=401,
-                detail="Session creation failed. Cookies may be invalid or expired."
+                detail=error_msg
             )
             
     except HTTPException:
         raise
     except Exception as e:
-        logging.error(f"Cookie injection failed: {str(e)}")
+        logging.error(f"Cookie injection failed with exception: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Cookie injection failed: {str(e)}"
