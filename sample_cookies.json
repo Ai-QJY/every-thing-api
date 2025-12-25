@@ -1,0 +1,22 @@
+{
+  "cookies": [
+    {
+      "name": "session_id",
+      "value": "abc123xyz",
+      "domain": ".grok.com",
+      "path": "/",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax",
+      "expires": 1767283816.920831
+    },
+    {
+      "name": "auth_token",
+      "value": "Bearer_token_12345",
+      "domain": ".grok.com",
+      "path": "/",
+      "httpOnly": true,
+      "secure": true
+    }
+  ]
+}
