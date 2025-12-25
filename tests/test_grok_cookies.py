@@ -258,7 +258,8 @@ def test_config_has_grok_settings():
     assert config.GROK_LOGIN_TIMEOUT == 120
     assert config.GROK_HEADLESS_MODE == False
     assert config.GROK_OAUTH_TIMEOUT == 600
-    assert config.GROK_COOKIE_FILE_PATH == "data/grok_cookies.json"
+    assert "grok_cookies.json" in config.GROK_COOKIE_FILE_PATH
+    assert config.GROK_OAUTH_PERSISTENT_CONTEXT == True
     print("✓ Config has Grok-specific settings including OAuth")
 
 

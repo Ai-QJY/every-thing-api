@@ -28,10 +28,26 @@ class SessionManager:
         """Initialize Playwright and browser"""
         if self.playwright is None:
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=config.HEADLESS,
-                timeout=config.BROWSER_TIMEOUT
-            )
+
+        if config.HEADLESS:
+            if self.browser is None:
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    timeout=config.BROWSER_TIMEOUT,
+                )
+        else:
+            if self.context is None:
+                user_data_dir = Path(config.SESSION_DIR) / "session_manager_profile"
+                user_data_dir.mkdir(parents=True, exist_ok=True)
+
+                self.context = await self.playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(user_data_dir),
+                    headless=False,
+                    timeout=config.BROWSER_TIMEOUT,
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=True,
+                )
+                self.browser = None
         
     async def close(self):
         """Close browser and cleanup"""
@@ -58,17 +74,19 @@ class SessionManager:
         try:
             await self.initialize()
             
-            # Create new context with persistent storage
-            user_data_dir = Path(config.SESSION_DIR) / "user_data"
-            user_data_dir.mkdir(parents=True, exist_ok=True)
-            
-            self.context = await self.browser.new_context(
-                user_data_dir=str(user_data_dir),
-                viewport={"width": 1280, "height": 800},
-                ignore_https_errors=True
-            )
-            
-            self.page = await self.context.new_page()
+            if self.context is None and self.browser is not None:
+                self.context = await self.browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=True
+                )
+
+            if self.context is None:
+                raise Exception("Browser context not initialized")
+
+            if self.context.pages:
+                self.page = self.context.pages[0]
+            else:
+                self.page = await self.context.new_page()
             
             # Navigate to login page
             await self.page.goto(config.GROK_URL, timeout=config.LOGIN_TIMEOUT * 1000)
@@ -246,17 +264,19 @@ class SessionManager:
         try:
             await self.initialize()
             
-            # Create new context with persistent storage
-            user_data_dir = Path(config.SESSION_DIR) / "user_data"
-            user_data_dir.mkdir(parents=True, exist_ok=True)
-            
-            self.context = await self.browser.new_context(
-                user_data_dir=str(user_data_dir),
-                viewport={"width": 1280, "height": 800},
-                ignore_https_errors=True
-            )
-            
-            self.page = await self.context.new_page()
+            if self.context is None and self.browser is not None:
+                self.context = await self.browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=True
+                )
+
+            if self.context is None:
+                raise Exception("Browser context not initialized")
+
+            if self.context.pages:
+                self.page = self.context.pages[0]
+            else:
+                self.page = await self.context.new_page()
             
             # Navigate to OAuth callback URL or provider-specific login page
             oauth_url = self._get_oauth_url(provider, auth_code, redirect_uri)
@@ -319,21 +339,23 @@ class SessionManager:
         try:
             await self.initialize()
             
-            # Create new context with persistent storage
-            user_data_dir = Path(config.SESSION_DIR) / "user_data"
-            user_data_dir.mkdir(parents=True, exist_ok=True)
+            if self.context is None and self.browser is not None:
+                context_kwargs = {
+                    "viewport": {"width": 1280, "height": 800},
+                    "ignore_https_errors": True,
+                }
+                if user_agent:
+                    context_kwargs["user_agent"] = user_agent
+
+                self.context = await self.browser.new_context(**context_kwargs)
+
+            if self.context is None:
+                raise Exception("Browser context not initialized")
             
-            self.context = await self.browser.new_context(
-                user_data_dir=str(user_data_dir),
-                viewport={"width": 1280, "height": 800},
-                ignore_https_errors=True
-            )
-            
-            # Set user agent if provided
-            if user_agent:
-                await self.context.set_user_agent(user_agent)
-            
-            self.page = await self.context.new_page()
+            if self.context.pages:
+                self.page = self.context.pages[0]
+            else:
+                self.page = await self.context.new_page()
             
             # Add cookies to the browser context
             cookie_count = 0

@@ -38,10 +38,26 @@ class GrokCookieExtractor:
         """Initialize Playwright and browser"""
         if self.playwright is None:
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=config.GROK_HEADLESS_MODE,
-                timeout=config.BROWSER_TIMEOUT
-            )
+
+        if config.GROK_HEADLESS_MODE:
+            if self.browser is None:
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    timeout=config.BROWSER_TIMEOUT,
+                )
+        else:
+            if self.context is None:
+                profile_dir = Path(config.SESSION_DIR) / "grok_cookie_extractor_profile"
+                profile_dir.mkdir(parents=True, exist_ok=True)
+
+                self.context = await self.playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=False,
+                    timeout=config.BROWSER_TIMEOUT,
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=True,
+                )
+                self.browser = None
     
     async def close(self):
         """Close browser and cleanup resources"""
@@ -98,12 +114,19 @@ class GrokCookieExtractor:
         try:
             await self.initialize()
             
-            self.context = await self.browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                ignore_https_errors=True
-            )
-            
-            self.page = await self.context.new_page()
+            if self.context is None and self.browser is not None:
+                self.context = await self.browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=True
+                )
+
+            if self.context is None:
+                raise Exception("Browser context not initialized")
+
+            if self.context.pages:
+                self.page = self.context.pages[0]
+            else:
+                self.page = await self.context.new_page()
             
             await self._perform_login(email, password, timeout)
             
@@ -349,6 +372,9 @@ class ManualOAuthExtractor:
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
             "--no-sandbox",
+            "--disable-infobars",
+            "--no-first-run",
+            "--no-default-browser-check",
         ]
 
         context_options = {
@@ -360,6 +386,9 @@ class ManualOAuthExtractor:
         if config.GROK_OAUTH_PERSISTENT_CONTEXT:
             profile_dir = Path(config.GROK_OAUTH_USER_DATA_DIR)
             profile_dir.mkdir(parents=True, exist_ok=True)
+
+            logger.info(f"使用持久化浏览器配置文件: {profile_dir}")
+            logger.info("这将保存您的登录状态，避免每次都需要重新登录")
 
             self.context = await self.playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_dir),
@@ -415,7 +444,7 @@ class ManualOAuthExtractor:
     def _print_user_instructions(self, timeout: int):
         """Print clear instructions for the user"""
         print("\n" + "=" * 60)
-        print("✅ 浏览器已打开")
+        print("✅ 浏览器已打开（正常模式，非无痕模式）")
         print("⏳ 请在浏览器中完成以下步骤：")
         print("   1. 点击 'Sign in with Google' 按钮")
         print("   2. 使用 Google 账号登录")
@@ -423,6 +452,7 @@ class ManualOAuthExtractor:
         print("   4. 等待页面加载完成")
         print(f"\n⏰ 等待超时时间：{timeout} 秒（{timeout // 60} 分钟）")
         print("\n📌 提示：")
+        print("   - 浏览器使用持久化配置文件，登录信息会被保存")
         print("   - 登录完成后，Cookie 将自动导出")
         print("   - 提取完成前请不要关闭浏览器窗口（关闭会导致提取失败）")
         print("   - 可以随时按 Ctrl+C 中止操作")
