@@ -536,21 +536,29 @@ class SessionManager:
             
             logging.info(f"Injecting {len(valid_cookies)} valid cookies (filtered from {len(cookies)} total)")
             
-            # Add cookies to the browser context
-            cookie_count = 0
-            failed_cookies = []
+            # Add cookies to the browser context using enhanced injector
+            from services.enhanced_cookie_injector import EnhancedCookieInjector
             
-            for cookie in valid_cookies:
-                try:
-                    await self.context.add_cookies([cookie])
-                    cookie_count += 1
-                    logging.debug(f"Successfully injected cookie: {cookie['name']}")
-                except Exception as e:
-                    failed_cookies.append(cookie['name'])
-                    logging.warning(f"Failed to add cookie {cookie['name']}: {str(e)}")
+            injection_report = await EnhancedCookieInjector.inject_cookies_with_report(
+                self.context, valid_cookies, self.page
+            )
             
-            if failed_cookies:
-                logging.warning(f"Failed to inject {len(failed_cookies)} cookies: {', '.join(failed_cookies)}")
+            cookie_count = injection_report["cookies_injected"]
+            
+            # Log the detailed report
+            logging.info(f"Enhanced injection completed. Report:")
+            logging.info(f"  - Processed: {injection_report['cookies_processed']}")
+            logging.info(f"  - Valid: {injection_report['cookies_valid']}")
+            logging.info(f"  - Injected: {injection_report['cookies_injected']}")
+            logging.info(f"  - Failed: {injection_report['cookies_failed']}")
+            
+            if injection_report.get("recommendations"):
+                logging.info("Recommendations:")
+                for rec in injection_report["recommendations"]:
+                    logging.info(f"  - {rec}")
+            
+            if not injection_report["success"]:
+                logging.error("Enhanced cookie injection reported issues. See details above.")
             
             # Navigate to a suitable URL to apply the cookies (prefer Grok UI)
             validation_url = config.GROK_URL

@@ -1,121 +1,323 @@
 #!/usr/bin/env python3
 """
-Debug script to test cookie injection and understand why validation fails
+Debug script for cookie injection
+Runs comprehensive tests to identify why cookies are not being injected
 """
 import asyncio
-import logging
 import json
 import sys
+import logging
 from pathlib import Path
-from services.session_manager import SessionManager
-from services.cookie_extractor import load_cookies_from_file
-from config import config
+from datetime import datetime
+from typing import Dict, Any, List
 
-# Setup logging
+# Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-async def debug_cookie_injection():
-    """Test cookie injection and print detailed debug information"""
-    print("=" * 80)
-    print("🔍 Cookie Injection Debug Tool")
-    print("=" * 80)
-    
-    # Load cookies
+sys.path.insert(0, str(Path(__file__).parent))
+
+from config import config
+from services.session_manager import SessionManager
+
+def load_cookies_from_file(filepath):
+    """Load cookies from JSON file"""
     try:
-        cookies = load_cookies_from_file()
-        print(f"\n✅ Loaded {len(cookies)} cookies from file")
-        
-        # Print cookie summary
-        print("\n📋 Cookie Summary:")
-        for cookie in cookies[:5]:  # Show first 5
-            print(f"  - {cookie['name']}: domain={cookie.get('domain')}, expires={cookie.get('expires')}")
-        if len(cookies) > 5:
-            print(f"  ... and {len(cookies) - 5} more")
-            
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+            cookies = data.get("cookies", [])
+            logging.info(f"Loaded {len(cookies)} cookies from {filepath}")
+            return cookies
     except Exception as e:
-        print(f"\n❌ Failed to load cookies: {e}")
-        print("\n💡 Hint: Make sure you have extracted cookies first using:")
-        print("   python scripts/extract_grok_cookies.py")
-        return
+        logging.error(f"Failed to load cookies from {filepath}: {e}")
+        return []
+
+def validate_cookie_structure(cookie: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and normalize a single cookie"""
+    errors = []
+    warnings = []
     
-    # Check if cookies are expired
-    from datetime import datetime
-    current_ts = datetime.now().timestamp()
-    expired_count = 0
-    valid_count = 0
+    # Check required fields
+    required_fields = ["name", "value", "domain"]
+    for field in required_fields:
+        if field not in cookie:
+            errors.append(f"Missing required field: {field}")
     
-    for cookie in cookies:
-        expires = cookie.get("expires")
-        if expires and expires > 0:
-            if expires < current_ts:
-                expired_count += 1
+    # Check name and value
+    name = cookie.get("name", "")
+    value = cookie.get("value", "")
+    
+    if not name:
+        errors.append("Cookie name is empty")
+    if not value:
+        warnings.append("Cookie value is empty")
+    
+    # Check domain
+    domain = cookie.get("domain", "")
+    if not domain:
+        errors.append("Missing domain")
+    else:
+        # Ensure domain starts with dot for subdomains
+        if not domain.startswith(".") and "." in domain:
+            warnings.append(f"Domain '{domain}' should start with . for subdomain cookies")
+    
+    # Check path
+    path = cookie.get("path", "/")
+    if not path:
+        cookie["path"] = "/"
+        warnings.append("Path was empty, set to '/'")
+    
+    # Check expires
+    expires = cookie.get("expires")
+    if expires is not None:
+        try:
+            if isinstance(expires, (int, float)):
+                epoch_ts = float(expires)
+                # Convert milliseconds to seconds if needed
+                if epoch_ts > 1e10:
+                    epoch_ts = epoch_ts / 1000
+                    warnings.append("Converting expires from milliseconds to seconds")
+                
+                expiry_date = datetime.fromtimestamp(epoch_ts)
+                now = datetime.now()
+                
+                if epoch_ts <= 0:
+                    warnings.append("Expires is 0 (session cookie)")
+                elif epoch_ts < now.timestamp():
+                    errors.append(f"Cookie expired at {expiry_date}")
+                else:
+                    hours_left = (expiry_date - now).total_seconds() / 3600
+                    if hours_left < 24:
+                        warnings.append(f"Cookie expires in {hours_left:.1f} hours")
+                
+                cookie["expires"] = epoch_ts
             else:
-                valid_count += 1
+                errors.append(f"Invalid expires format: {expires}")
+        except Exception as e:
+            errors.append(f"Error parsing expires: {e}")
     
-    print(f"\n⏰ Cookie Expiration Status:")
-    print(f"  - Valid: {valid_count}")
-    print(f"  - Expired: {expired_count}")
-    print(f"  - Session (no expiry): {len(cookies) - valid_count - expired_count}")
+    # Check boolean fields
+    http_only = cookie.get("httpOnly")
+    if http_only is not None and not isinstance(http_only, bool):
+        warnings.append(f"httpOnly should be boolean, got {type(http_only)}")
+        cookie["httpOnly"] = bool(http_only)
     
-    # Create session manager
-    print("\n🚀 Starting cookie injection test...")
-    session_manager = SessionManager()
+    secure = cookie.get("secure")
+    if secure is not None and not isinstance(secure, bool):
+        warnings.append(f"secure should be boolean, got {type(secure)}")
+        cookie["secure"] = bool(secure)
     
-    try:
-        print("\n1️⃣ Initializing browser...")
-        await session_manager.initialize()
-        print("   ✅ Browser initialized")
+    # Validate sameSite
+    same_site = cookie.get("sameSite")
+    if same_site:
+        valid_values = ["Lax", "Strict", "None"]
+        if same_site not in valid_values:
+            # Try to normalize
+            normalized = {
+                "lax": "Lax",
+                "strict": "Strict", 
+                "none": "None",
+                "no_restriction": "None"
+            }.get(str(same_site).lower())
+            
+            if normalized:
+                cookie["sameSite"] = normalized
+                warnings.append(f"Normalized sameSite from '{same_site}' to '{normalized}'")
+            else:
+                warnings.append(f"Invalid sameSite value: '{same_site}', removing")
+                del cookie["sameSite"]
+    
+    return {
+        "cookie": cookie,
+        "errors": errors,
+        "warnings": warnings,
+        "valid": len(errors) == 0
+    }
+
+def validate_all_cookies(cookies: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Validate all cookies and return detailed report"""
+    total = len(cookies)
+    valid_cookies = []
+    invalid_cookies = []
+    domain_stats = {}
+    
+    logging.info(f"\n{'='*60}")
+    logging.info(f"Validating {total} cookies")
+    logging.info(f"{'='*60}")
+    
+    for i, cookie in enumerate(cookies):
+        result = validate_cookie_structure(cookie.copy())
+        cookie_obj = result["cookie"]
         
-        print("\n2️⃣ Injecting cookies...")
-        success, cookie_count = await session_manager.inject_cookies(
-            cookies,
-            user_agent=None,
-            remember_me=True
-        )
+        # Count domains
+        domain = cookie_obj.get("domain", "unknown")
+        domain_stats[domain] = domain_stats.get(domain, 0) + 1
         
-        if success:
-            print(f"\n✅ SUCCESS! Injected {cookie_count} cookies and validated session")
+        if result["valid"]:
+            valid_cookies.append(cookie_obj)
+            status = "✓"
         else:
-            print(f"\n❌ FAILED! Injected {cookie_count} cookies but session validation failed")
-            print("\nPossible causes:")
-            print("1. Cookies are expired or invalid")
-            print("2. The session was invalidated on the server")
-            print("3. Login detection logic needs adjustment")
-            print("4. Network/connectivity issues")
-            
-        # Get current page URL
-        if session_manager.page:
-            current_url = session_manager.page.url
-            print(f"\n🌐 Current page URL: {current_url}")
-            
-            # Take a screenshot for debugging
-            screenshot_path = Path(config.OUTPUT_DIR) / "debug_cookie_injection.png"
-            await session_manager.page.screenshot(path=str(screenshot_path))
-            print(f"📸 Screenshot saved to: {screenshot_path}")
-            
-            # Print page title
-            title = await session_manager.page.title()
-            print(f"📄 Page title: {title}")
-            
-            # Get all cookies from context
-            current_cookies = await session_manager.context.cookies()
-            print(f"\n🍪 Current browser has {len(current_cookies)} cookies")
-            
-            # Keep browser open for manual inspection
-            print("\n⏳ Keeping browser open for 30 seconds for manual inspection...")
-            print("   You can check if the page is actually logged in")
-            await asyncio.sleep(30)
+            invalid_cookies.append({
+                "cookie": cookie_obj,
+                "errors": result["errors"],
+                "warnings": result["warnings"]
+            })
+            status = "✗"
+        
+        logging.info(f"\n{i+1:2d}. [{status}] Cookie: {cookie_obj.get('name', 'unnamed')}")
+        logging.info(f"    Domain: {cookie_obj.get('domain')}")
+        
+        if result["warnings"]:
+            for w in result["warnings"]:
+                logging.info(f"    ⚠️  {w}")
+        
+        if not result["valid"]:
+            for e in result["errors"]:
+                logging.info(f"    ❌ {e}")
+    
+    logging.info(f"\n{'='*60}")
+    logging.info(f"Summary:")
+    logging.info(f"  Total cookies: {total}")
+    logging.info(f"  Valid cookies: {len(valid_cookies)}")
+    logging.info(f"  Invalid cookies: {len(invalid_cookies)}")
+    logging.info(f"\nDomain distribution:")
+    for domain, count in sorted(domain_stats.items()):
+        logging.info(f"  {domain}: {count}")
+    
+    return {
+        "total": total,
+        "valid": len(valid_cookies),
+        "invalid": len(invalid_cookies),
+        "valid_cookies": valid_cookies,
+        "invalid_cookies": invalid_cookies,
+        "domain_stats": domain_stats
+    }
+
+async def test_cookie_injection_detailed(cookies: List[Dict[str, Any]]):
+    """Test injection with detailed logging"""
+    logging.info(f"\n{'='*60}")
+    logging.info("TESTING COOKIE INJECTION")
+    logging.info(f"{'='*60}")
+    
+    if not cookies:
+        logging.error("No cookies provided for injection test")
+        return False, 0
+    
+    # Validate cookies first
+    validation = validate_all_cookies(cookies)
+    
+    if validation["valid"] == 0:
+        logging.error("No valid cookies to inject!")
+        return False, 0
+    
+    # Test injection
+    try:
+        session_manager = SessionManager()
+        success, cookie_count = await session_manager.inject_cookies(validation["valid_cookies"])
+        
+        logging.info(f"\n{'='*60}")
+        logging.info("INJECTION RESULT:")
+        logging.info(f"{'='*60}")
+        logging.info(f"Success: {success}")
+        logging.info(f"Number of cookies injected: {cookie_count}")
+        logging.info(f"Expected: {validation['valid']}")
+        
+        if not success:
+            logging.error("INJECTION FAILED!")
+            logging.error("Make sure:")
+            logging.error("1. Browser is visible (HEADLESS=False)")
+            logging.error("2. You can manually check the browser state")
+            logging.error("3. Check logs above for any errors during injection")
+        else:
+            logging.info("✅ INJECTION SUCCESSFUL!")
+        
+        await session_manager.close()
+        return success, cookie_count
         
     except Exception as e:
-        print(f"\n❌ Error during injection: {e}")
-        logging.exception("Full error details:")
-    finally:
-        print("\n🧹 Cleaning up...")
-        await session_manager.close()
-        print("   ✅ Done")
+        logging.error(f"Exception during injection test: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, 0
+
+def check_cookie_file_exists():
+    """Check if cookie file exists in standard locations"""
+    possible_paths = [
+        config.GROK_COOKIE_FILE_PATH,
+        Path("data/grok_cookies.json"),
+        Path("grok_cookies.json"),
+    ]
+    
+    for path in possible_paths:
+        if Path(path).exists():
+            logging.info(f"Found cookie file at: {path}")
+            return str(path)
+    
+    logging.warning("No cookie file found in standard locations")
+    logging.info(f"Expected at: {config.GROK_COOKIE_FILE_PATH}")
+    return None
+
+def create_test_cookies():
+    """Create test cookies for validation testing"""
+    return [
+        {
+            "name": "test_cookie_1",
+            "value": "test_value_1",
+            "domain": ".grok.com",
+            "path": "/",
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "Lax"
+        },
+        {
+            "name": "test_cookie_2",
+            "value": "test_value_2",
+            "domain": ".x.ai",
+            "path": "/",
+            "expires": (datetime.now().timestamp() + 86400),  # 24 hours from now
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "Strict"
+        }
+    ]
+
+async def main():
+    """Main test function"""
+    logging.info("Starting cookie injection debug test")
+    
+    # Try to load real cookies first
+    cookie_file = check_cookie_file_exists()
+    cookies = []
+    
+    if cookie_file:
+        cookies = load_cookies_from_file(cookie_file)
+    else:
+        logging.warning("No cookie file found, using test cookies")
+        cookies = create_test_cookies()
+    
+    if not cookies:
+        logging.error("No cookies available for testing")
+        return False
+    
+    # Run injection test
+    success, count = await test_cookie_injection_detailed(cookies)
+    
+    logging.info(f"\n{'='*60}")
+    logging.info("FINAL RESULT")
+    logging.info(f"{'='*60}")
+    logging.info(f"Injection successful: {success}")
+    logging.info(f"Cookies injected: {count}")
+    
+    return success
 
 if __name__ == "__main__":
-    asyncio.run(debug_cookie_injection())
+    try:
+        result = asyncio.run(main())
+        sys.exit(0 if result else 1)
+    except Exception as e:
+        logging.error(f"Test failed with exception: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
