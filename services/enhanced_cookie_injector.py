@@ -56,17 +56,29 @@ class EnhancedCookieInjector:
             # Fix domain format
             domain_str = str(domain).strip().lower()
             had_leading_dot = domain_str.startswith(".")
-            
-            # Remove leading dot, then re-add it properly
             domain_clean = domain_str.lstrip(".")
-            if had_leading_dot or domain_clean.count(".") >= 1:
-                # Subdomain cookie, should have leading dot
-                if not domain_str.startswith("."):
-                    warnings.append(f"Domain '{domain}' should start with '.' for subdomain cookies")
-                    fixes.append(f"Added leading dot to domain: .{domain_clean}")
+
+            # Count parts in domain
+            parts = domain_clean.split(".")
+            dot_count = len(parts) - 1
+
+            # Determine if we should add leading dot
+            # - If original had dot, keep it
+            # - If domain has 2+ dots AND first part is NOT a known TLD pattern, add dot
+            # - For standard two-part domains (e.g., "accounts.x.ai"), keep as-is
+
+            if had_leading_dot:
+                # Original had dot, keep it
+                fixed_cookie["domain"] = "." + domain_clean
+            elif dot_count >= 2 and len(parts[0]) <= 3:
+                # Short first part like "www", "api", etc. - likely a subdomain
+                # Examples: "www.grok.com" → ".www.grok.com" (subdomain cookie)
+                warnings.append(f"Domain '{domain}' should start with '.' for subdomain cookies")
+                fixes.append(f"Added leading dot to domain: .{domain_clean}")
                 fixed_cookie["domain"] = "." + domain_clean
             else:
-                # Domain cookie (e.g., 'localhost')
+                # Standard domain or known multi-part domain like "accounts.x.ai"
+                # Keep as-is without leading dot
                 fixed_cookie["domain"] = domain_clean
         
         # Validate path
@@ -87,6 +99,16 @@ class EnhancedCookieInjector:
                 fixed_cookie[field] = bool(value)
             else:
                 fixed_cookie[field] = value
+
+        # CRITICAL: SameSite=None requires Secure=True (browser security requirement)
+        same_site = cookie.get("sameSite")
+        if same_site:
+            same_site_str = str(same_site)
+            if same_site_str.lower() == "none":
+                if not fixed_cookie.get("secure", False):
+                    warnings.append("SameSite=None requires Secure=True, auto-enabling")
+                    fixes.append("Set secure=True for SameSite=None cookie")
+                    fixed_cookie["secure"] = True
         
         # Validate and normalize expires
         expires = cookie.get("expires")
@@ -219,6 +241,11 @@ class EnhancedCookieInjector:
             
             for error in result["errors"]:
                 logger.error(f"    Error: {error}")
+            
+            # Log fixed cookie details if valid
+            if result["valid"] and result["fixed"]:
+                fixed = result["fixed"]
+                logger.debug(f"    Fixed: domain={fixed.get('domain')}, secure={fixed.get('secure')}, sameSite={fixed.get('sameSite')}")
         
         # Statistics
         valid_cookies = [r["fixed"] for r in validation_results if r["valid"]]

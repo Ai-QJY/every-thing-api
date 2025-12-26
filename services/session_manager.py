@@ -495,7 +495,8 @@ class SessionManager:
                     logging.debug(f"Skipping expired cookie: {cookie.get('name', '')}")
                     continue
 
-                # Normalize domain
+                # Normalize domain - preserve the original domain format
+                # Don't artificially add leading dots to domains that didn't have them
                 domain_raw = str(cookie.get("domain", "")).strip()
                 if not domain_raw:
                     logging.debug(f"Skipping cookie without domain: {cookie.get('name', '')}")
@@ -505,6 +506,7 @@ class SessionManager:
                 domain = domain_raw.lstrip(".")
                 if had_leading_dot:
                     domain = "." + domain
+                # For domains like "accounts.x.ai" without leading dot, keep as-is
 
                 cookie_data: Dict[str, Any] = {
                     "name": cookie["name"],
@@ -520,7 +522,9 @@ class SessionManager:
                     cookie_data["expires"] = float(expires)
 
                 # Add sameSite if present (normalize common formats)
+                # CRITICAL: SameSite=None requires Secure=True for browser security
                 same_site = cookie.get("sameSite")
+                cookie_secure = cookie.get("secure", False)
                 if same_site:
                     same_site_str = str(same_site)
                     same_site_norm = {
@@ -531,6 +535,10 @@ class SessionManager:
                     }.get(same_site_str.lower())
                     if same_site_norm:
                         cookie_data["sameSite"] = same_site_norm
+                        # Auto-enable Secure for SameSite=None (browser requirement)
+                        if same_site_norm == "None" and not cookie_secure:
+                            logging.debug(f"Auto-enabling secure=True for SameSite=None cookie: {cookie['name']}")
+                            cookie_data["secure"] = True
 
                 valid_cookies.append(cookie_data)
             
