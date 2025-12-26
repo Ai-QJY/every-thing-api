@@ -404,6 +404,27 @@ class ManualOAuthExtractor:
             )
             self.context = await self.browser.new_context(**context_options)
 
+        # Set up event handlers for popup windows
+        async def handle_popup(popup_page):
+            """Handle new popup windows (e.g., Google OAuth popup)"""
+            popup_url = popup_page.url
+            logger.info(f"📭 New popup window detected: {popup_url[:80]}...")
+            
+            # Track the popup
+            if "google" in popup_url.lower() or "accounts.google" in popup_url.lower():
+                logger.info("🔐 Google OAuth popup detected - please complete login in the popup")
+            
+            # Log when popup closes
+            async def on_close():
+                try:
+                    logger.debug("Popup window closed")
+                except Exception:
+                    pass
+            
+            popup_page.on("close", on_close)
+        
+        self.context.on("page", handle_popup)
+
         if self.context.pages:
             self.page = self.context.pages[0]
         else:
@@ -459,9 +480,9 @@ class ManualOAuthExtractor:
         print("=" * 60 + "\n")
     
     async def _wait_for_login_completion(self, timeout_seconds: int) -> bool:
-        """Wait for user to complete login by monitoring URL changes."""
+        """Wait for user to complete login by monitoring URL changes and new windows."""
         try:
-            await asyncio.wait_for(self._wait_for_url_change(), timeout=timeout_seconds)
+            await asyncio.wait_for(self._wait_for_url_change_with_popups(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             logger.info("Login completion wait timed out")
             return False
@@ -474,36 +495,110 @@ class ManualOAuthExtractor:
 
         return True
 
-    async def _wait_for_url_change(self):
-        """Wait for URL to change to a logged-in state."""
-        for _ in range(600):  # Check every second for 10 minutes max
-            if self._stop_event.is_set() or not self.page or self.page.is_closed():
+    async def _wait_for_url_change_with_popups(self):
+        """
+        Wait for URL to change to a logged-in state.
+        
+        Handles both:
+        1. Redirect flow: grok.com → accounts.google.com → grok.com
+        2. Popup flow: Main window stays, popup handles Google login
+        """
+        login_check_interval = 1  # Check every second
+        max_checks = 600  # 10 minutes max
+        
+        checked_urls = set()  # Track URLs we've already processed
+        all_pages_checked = set()  # Track all pages we've checked
+        
+        for check_count in range(max_checks):
+            if self._stop_event.is_set():
                 return
 
-            await asyncio.sleep(1)
+            if not self.context:
+                return
 
             try:
-                current_url = self.page.url
-            except Exception:
-                return
-
-            if (
-                "accounts.google.com" not in current_url
-                and ("grok.com" in current_url or "x.ai" in current_url)
-            ):
-                logger.info(f"Detected login completion. Current URL: {current_url}")
-                return
-
-            try:
-                chat_elements = await self.page.query_selector_all(
-                    '[class*="chat"], [class*="conversation"], textarea, input[class*="prompt"]'
-                )
-                if chat_elements:
-                    logger.info("Detected chat interface elements")
+                # Get ALL pages in the context (handles popup windows)
+                all_pages = self.context.pages
+                
+                # Filter out empty/invalid pages
+                valid_pages = []
+                for p in all_pages:
+                    if p and not p.is_closed():
+                        try:
+                            _ = p.url
+                            valid_pages.append(p)
+                        except Exception:
+                            continue
+                
+                # Check all pages for login completion
+                login_completed = False
+                grok_page_found = False
+                
+                for page in valid_pages:
+                    try:
+                        current_url = page.url
+                        all_pages_checked.add(current_url)
+                        
+                        # Check if this page is on grok.com or x.ai (logged in state)
+                        if "grok.com" in current_url or "x.ai" in current_url:
+                            grok_page_found = True
+                            
+                            # Check for chat interface or logged-in elements
+                            chat_elements = await page.query_selector_all(
+                                'textarea, [class*="chat"], [class*="conversation"], '
+                                '[class*="prompt"], [class*="input"], [role="textbox"]'
+                            )
+                            
+                            # Also check that we're NOT on a login page
+                            is_login_page = any(keyword in current_url.lower() 
+                                               for keyword in ["login", "signin", "auth/", "oauth/"])
+                            
+                            if chat_elements and not is_login_page:
+                                logger.info(f"✅ Detected logged-in state on: {current_url}")
+                                logger.info(f"   Found {len(chat_elements)} chat interface elements")
+                                login_completed = True
+                                break
+                            
+                            # If URL suggests we're on the main app, consider it logged in
+                            if not is_login_page and len(chat_elements) > 0:
+                                logger.info(f"✅ Detected app interface on: {current_url}")
+                                login_completed = True
+                                break
+                        
+                        # Check if still on Google auth page
+                        if "accounts.google.com" in current_url:
+                            # Still on Google, continue waiting
+                            if current_url not in checked_urls:
+                                logger.debug(f"Still on Google auth page: {current_url[:80]}...")
+                                checked_urls.add(current_url)
+                    
+                    except Exception:
+                        continue
+                
+                if login_completed:
                     return
-            except Exception:
-                if not self.page or self.page.is_closed():
+                
+                # If we found a Grok page but no chat elements, still wait (might still be loading)
+                if grok_page_found:
+                    logger.debug("Found Grok page, waiting for chat interface to load...")
+                
+                # Log progress periodically
+                if check_count > 0 and check_count % 30 == 0:
+                    elapsed = check_count * login_check_interval
+                    logger.info(f"⏳ Still waiting for login... ({elapsed}s elapsed)")
+                    # List all pages for debugging
+                    page_urls = [p.url for p in valid_pages if p and hasattr(p, 'url')]
+                    if page_urls:
+                        logger.debug(f"   Open pages: {page_urls[:5]}")
+                
+                await asyncio.sleep(login_check_interval)
+                
+            except Exception as e:
+                if "closed" in str(e).lower():
+                    logger.debug("Browser context was closed")
                     return
+                logger.warning(f"Error checking login status: {e}")
+                await asyncio.sleep(login_check_interval)
     
     async def extract_with_manual_oauth(
         self,
